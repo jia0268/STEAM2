@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>馬格納斯：V25 專業影像過濾系統</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        :root { --brand-cyan: #06b6d4; --brand-red: #ef4444; --brand-orange: #f97316; }
+        body { margin: 0; background: #000; color: white; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+        
+        #container { position: relative; width: 100vw; height: 100dvh; display: flex; justify-content: center; align-items: center; overflow: hidden; }
+        
+        video, #result-canvas { 
+            position: absolute; 
+            width: 100%; 
+            height: 100%; 
+            object-fit: contain; 
+            z-index: 1; 
+            background: #000;
+        }
+        
+        #result-canvas { z-index: 10; display: none; image-rendering: auto; }
+        
+        #mask-container {
+            position: absolute;
+            z-index: 5;
+            pointer-events: none;
+            display: flex;
+            transition: opacity 0.3s;
+        }
+        
+        .mask-label {
+            position: absolute; top: 1rem; left: 0.5rem; 
+            font-size: 10px; padding: 2px 6px; border-radius: 4px;
+            color: white; font-weight: bold; white-space: nowrap;
+        }
+
+        /* UI Layering */
+        .safe-area-inset { padding-bottom: env(safe-area-inset-bottom); }
+        .ui-overlay { 
+            position: absolute; bottom: 0; left: 0; width: 100%; 
+            z-index: 50; pointer-events: none;
+        }
+        .controls-card {
+            pointer-events: auto;
+            background: rgba(15, 23, 42, 0.9);
+            backdrop-filter: blur(16px);
+            border-top: 1px solid rgba(255,255,255,0.1);
+            border-radius: 20px 20px 0 0;
+            padding: 1.25rem;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        /* Custom Range Styling */
+        input[type=range] { -webkit-appearance: none; background: transparent; }
+        input[type=range]::-webkit-slider-runnable-track { height: 4px; background: rgba(255,255,255,0.2); border-radius: 2px; }
+        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 18px; width: 18px; border-radius: 50%; background: white; margin-top: -7px; cursor: pointer; box-shadow: 0 0 10px rgba(0,0,0,0.5); }
+
+        /* Animation */
+        @keyframes pulse-red { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .recording-dot { width: 12px; height: 12px; background: var(--brand-red); border-radius: 50%; animation: pulse-red 1s infinite; }
+    </style>
+</head>
+<body>
+
+<div id="container">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="result-canvas"></canvas>
+    
+    <!-- 遮罩顯示層 -->
+    <div id="mask-container">
+        <div id="fixed-mask" class="relative border-r-2 border-dashed border-red-500 bg-red-500/10">
+            <span class="mask-label bg-red-600">固定忽略區</span>
+        </div>
+        <div id="transition-mask" class="relative border-r-2 border-dotted border-orange-500 bg-orange-500/10">
+            <span class="mask-label bg-orange-600">肢體過濾區</span>
+        </div>
+    </div>
+
+    <!-- 狀態標籤 -->
+    <div class="absolute top-4 left-4 z-[60] flex flex-col gap-2">
+        <div id="status" class="bg-black/60 backdrop-blur-md border border-white/20 px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-2">
+            <div id="status-indicator" class="w-2 h-2 rounded-full bg-emerald-500"></div>
+            <span id="status-text">系統就緒</span>
+        </div>
+    </div>
+
+    <!-- 錄製中覆蓋層 -->
+    <div id="recording-overlay" class="absolute inset-0 z-[55] bg-black/40 backdrop-blur-sm hidden flex-col items-center justify-center">
+        <div class="relative w-24 h-24 mb-6">
+            <svg class="w-full h-full rotate-[-90deg]">
+                <circle cx="48" cy="48" r="40" stroke="currentColor" stroke-width="6" fill="transparent" class="text-white/10" />
+                <circle id="progress-ring" cx="48" cy="48" r="40" stroke="currentColor" stroke-width="6" fill="transparent" stroke-dasharray="251.2" stroke-dashoffset="251.2" class="text-cyan-500 transition-all duration-100 ease-linear" />
+            </svg>
+            <div class="absolute inset-0 flex items-center justify-center font-mono text-2xl font-bold" id="countdown-text">2.5</div>
+        </div>
+        <div class="flex items-center gap-3">
+            <div class="recording-dot"></div>
+            <span class="tracking-[0.2em] font-black uppercase text-sm">Capturing High-Speed Frames</span>
+        </div>
+        <div class="mt-2 text-xs text-gray-400">已捕捉: <span id="frame-count" class="text-white">0</span> 影格</div>
+    </div>
+
+    <!-- 控制介面 -->
+    <div class="ui-overlay safe-area-inset">
+        <div class="controls-card shadow-2xl">
+            <div id="control-panel" class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <div class="flex flex-col gap-1.5">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[10px] text-gray-400 font-bold uppercase">固定區寬度</label>
+                        <span class="text-[10px] font-mono" id="val-p">25%</span>
+                    </div>
+                    <input type="range" id="person-mask" min="0" max="50" value="25">
+                </div>
+                <div class="flex flex-col gap-1.5">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[10px] text-gray-400 font-bold uppercase">過濾區寬度</label>
+                        <span class="text-[10px] font-mono" id="val-t">20%</span>
+                    </div>
+                    <input type="range" id="transition-width" min="0" max="40" value="20">
+                </div>
+                <div class="flex flex-col gap-1.5">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[10px] text-gray-400 font-bold uppercase">肢體過濾強度</label>
+                        <span class="text-[10px] font-mono" id="val-s">60</span>
+                    </div>
+                    <input type="range" id="skin-sensitivity" min="0" max="100" value="60">
+                </div>
+                <div class="flex flex-col gap-1.5">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[10px] text-gray-400 font-bold uppercase">偵測靈敏度</label>
+                        <span class="text-[10px] font-mono" id="val-v">45</span>
+                    </div>
+                    <input type="range" id="sensitivity-slider" min="5" max="150" value="45">
+                </div>
+            </div>
+
+            <div class="flex gap-3">
+                <button id="btn-switch" class="bg-white/10 hover:bg-white/20 active:scale-95 transition-all p-3 rounded-xl border border-white/10">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="m17 2 4 4-4 4"/></svg>
+                </button>
+                
+                <button id="btn-start" class="flex-1 bg-cyan-600 hover:bg-cyan-500 active:scale-[0.98] text-white font-black py-3 rounded-xl shadow-lg transition-all uppercase tracking-wider text-sm">
+                    開始捕捉
+                </button>
+                
+                <button id="btn-reset" class="flex-1 bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 rounded-xl hidden transition-all text-sm">
+                    返回預覽
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<canvas id="internal-canvas" class="hidden"></canvas>
+
+<script>
+    const state = {
+        isCapturing: false,
+        frames: [],
+        bgFrame: null,
+        currentFacingMode: 'environment', // 預設使用後置鏡頭
+        stream: null
+    };
+
+    const dom = {
+        video: document.getElementById('video'),
+        resCanvas: document.getElementById('result-canvas'),
+        intCanvas: document.getElementById('internal-canvas'),
+        maskWrap: document.getElementById('mask-container'),
+        fixedMask: document.getElementById('fixed-mask'),
+        transMask: document.getElementById('transition-mask'),
+        overlay: document.getElementById('recording-overlay'),
+        progRing: document.getElementById('progress-ring'),
+        countDown: document.getElementById('countdown-text'),
+        frameCount: document.getElementById('frame-count'),
+        btnStart: document.getElementById('btn-start'),
+        btnReset: document.getElementById('btn-reset'),
+        btnSwitch: document.getElementById('btn-switch'),
+        statusText: document.getElementById('status-text'),
+        statusInd: document.getElementById('status-indicator'),
+        
+        // Inputs
+        inPerson: document.getElementById('person-mask'),
+        inTrans: document.getElementById('transition-width'),
+        inSkin: document.getElementById('skin-sensitivity'),
+        inSens: document.getElementById('sensitivity-slider'),
+        
+        // Val displays
+        vP: document.getElementById('val-p'),
+        vT: document.getElementById('val-t'),
+        vS: document.getElementById('val-s'),
+        vV: document.getElementById('val-v')
+    };
+
+    const ctx = {
+        res: dom.resCanvas.getContext('2d'),
+        int: dom.intCanvas.getContext('2d', { willReadFrequently: true })
+    };
+
+    // 初始化與鏡頭控制
+    async function startCamera() {
+        if (state.stream) {
+            state.stream.getTracks().forEach(t => t.stop());
+        }
+
+        try {
+            const constraints = {
+                video: {
+                    facingMode: state.currentFacingMode,
+                    width: { ideal: 1920 },
+                    height: { ideal: 1080 }
+                },
+                audio: false
+            };
+
+            state.stream = await navigator.mediaDevices.getUserMedia(constraints);
+            dom.video.srcObject = state.stream;
+            
+            dom.video.onloadedmetadata = () => {
+                const w = dom.video.videoWidth;
+                const h = dom.video.videoHeight;
+                dom.intCanvas.width = dom.resCanvas.width = w;
+                dom.intCanvas.height = dom.resCanvas.height = h;
+                updateLayout();
+                updateStatus("系統就緒", "bg-emerald-500");
+            };
+        } catch (err) {
+            console.error(err);
+            updateStatus("無法存取攝像頭", "bg-red-500");
+        }
+    }
+
+    function toggleFacingMode() {
+        state.currentFacingMode = state.currentFacingMode === 'user' ? 'environment' : 'user';
+        startCamera();
+    }
+
+    function updateStatus(text, colorClass) {
+        dom.statusText.innerText = text;
+        dom.statusInd.className = `w-2 h-2 rounded-full ${colorClass}`;
+    }
+
+    function updateLayout() {
+        const v = dom.video;
+        const container = document.getElementById('container');
+        const vRatio = v.videoWidth / v.videoHeight;
+        const cRatio = container.clientWidth / container.clientHeight;
+        
+        let w, h;
+        if (cRatio > vRatio) {
+            h = container.clientHeight;
+            w = h * vRatio;
+        } else {
+            w = container.clientWidth;
+            h = w / vRatio;
+        }
+
+        dom.maskWrap.style.width = `${w}px`;
+        dom.maskWrap.style.height = `${h}px`;
+        
+        const pVal = dom.inPerson.value;
+        const tVal = dom.inTrans.value;
+        dom.fixedMask.style.width = `${pVal}%`;
+        dom.transMask.style.width = `${tVal}%`;
+        
+        dom.vP.innerText = `${pVal}%`;
+        dom.vT.innerText = `${tVal}%`;
+        dom.vS.innerText = dom.inSkin.value;
+        dom.vV.innerText = dom.inSens.value;
+    }
+
+    // 核心處理邏輯
+    function isBodyColor(r, g, b, sens) {
+        const s = sens / 100;
+        // 1. 陰影/深色
+        if (r < 55 * (2-s) && g < 55 * (2-s) && b < 55 * (2-s)) return true;
+        // 2. 暖色調 (皮膚/手)
+        if (r > g && g >= b) {
+            const saturation = r - b;
+            if (saturation > 20 && r > 40) {
+                const rgRatio = r / (g + 1);
+                if (rgRatio > (1.1 + 0.3 * s)) return true;
+            }
+        }
+        return false;
+    }
+
+    async function captureLoop(startTime) {
+        const duration = 2500;
+        const now = Date.now();
+        const elapsed = now - startTime;
+
+        if (elapsed < duration) {
+            const progress = (elapsed / duration);
+            const offset = 251.2 - (progress * 251.2);
+            dom.progRing.style.strokeDashoffset = offset;
+            dom.countDown.innerText = ((duration - elapsed) / 1000).toFixed(1);
+
+            ctx.int.drawImage(dom.video, 0, 0);
+            state.frames.push(ctx.int.getImageData(0, 0, dom.intCanvas.width, dom.intCanvas.height));
+            dom.frameCount.innerText = state.frames.length;
+
+            requestAnimationFrame(() => captureLoop(startTime));
+        } else {
+            processFrames();
+        }
+    }
+
+    function processFrames() {
+        state.isCapturing = false;
+        dom.overlay.style.display = 'none';
+        updateStatus("正在合成影像...", "bg-orange-500 animate-pulse");
+
+        setTimeout(() => {
+            const w = dom.intCanvas.width;
+            const h = dom.intCanvas.height;
+            const personX = w * (dom.inPerson.value / 100);
+            const transX = personX + (w * (dom.inTrans.value / 100));
+            const sens = parseInt(dom.inSens.value);
+            const skinSens = parseInt(dom.inSkin.value);
+
+            ctx.res.putImageData(state.bgFrame, 0, 0);
+            const finalData = ctx.res.getImageData(0, 0, w, h);
+            const target = finalData.data;
+            const base = state.bgFrame.data;
+
+            const diffMap = new Float32Array(w * h);
+
+            state.frames.forEach(frame => {
+                const data = frame.data;
+                for (let i = 0; i < data.length; i += 4) {
+                    const pxIdx = i >> 2;
+                    const x = pxIdx % w;
+                    
+                    if (x < personX) continue;
+
+                    const r = data[i], g = data[i+1], b = data[i+2];
+                    const diff = Math.abs(r - base[i]) + Math.abs(g - base[i+1]) + Math.abs(b - base[i+2]);
+
+                    if (diff > sens) {
+                        const sScale = (x < transX) ? 1.3 : 1.0;
+                        if (isBodyColor(r, g, b, skinSens * sScale)) continue;
+
+                        if (diff > diffMap[pxIdx]) {
+                            diffMap[pxIdx] = diff;
+                            target[i] = r; target[i+1] = g; target[i+2] = b;
+                        }
+                    }
+                }
+            });
+
+            ctx.res.putImageData(finalData, 0, 0);
+            dom.resCanvas.style.display = 'block';
+            dom.video.style.display = 'none';
+            dom.maskWrap.style.opacity = '0';
+            dom.btnStart.classList.add('hidden');
+            dom.btnSwitch.classList.add('hidden');
+            dom.btnReset.classList.remove('hidden');
+            updateStatus("完成 (已過濾肢體)", "bg-emerald-500");
+        }, 100);
+    }
+
+    // 事件監聽
+    dom.btnStart.onclick = () => {
+        state.isCapturing = true;
+        state.frames = [];
+        dom.btnStart.classList.add('hidden');
+        dom.overlay.style.display = 'flex';
+        
+        // 擷取背景基底
+        ctx.int.drawImage(dom.video, 0, 0);
+        state.bgFrame = ctx.int.getImageData(0, 0, dom.intCanvas.width, dom.intCanvas.height);
+        
+        captureLoop(Date.now());
+    };
+
+    dom.btnReset.onclick = () => {
+        dom.resCanvas.style.display = 'none';
+        dom.video.style.display = 'block';
+        dom.maskWrap.style.opacity = '1';
+        dom.btnStart.classList.remove('hidden');
+        dom.btnSwitch.classList.remove('hidden');
+        dom.btnReset.classList.add('hidden');
+        updateStatus("系統就緒", "bg-emerald-500");
+    };
+
+    dom.btnSwitch.onclick = toggleFacingMode;
+
+    [dom.inPerson, dom.inTrans, dom.inSkin, dom.inSens].forEach(el => {
+        el.oninput = updateLayout;
+    });
+
+    window.onresize = updateLayout;
+    window.onload = startCamera;
+</script>
+
+</body>
+</html>
